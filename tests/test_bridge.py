@@ -110,7 +110,7 @@ class BridgeCommandsTest(unittest.TestCase):
 
     def test_bridge_init_fails_outside_git_repo(self) -> None:
         with self.runner.isolated_filesystem():
-            result = self.runner.invoke(cli.main, ["bridge", "init"])
+            result = self.runner.invoke(cli.main, ["repo", "init"])
         self.assertNotEqual(result.exit_code, 0)
         self.assertIn("Not inside a Git repository.", result.output)
 
@@ -119,7 +119,7 @@ class BridgeCommandsTest(unittest.TestCase):
             repo_root = Path(tmpdir) / "repo"
             init_repo(repo_root)
             with working_directory(repo_root):
-                result = self.runner.invoke(cli.main, ["bridge", "init"])
+                result = self.runner.invoke(cli.main, ["repo", "init"])
         self.assertNotEqual(result.exit_code, 0)
         self.assertIn("No such remote 'origin'", result.output)
 
@@ -134,7 +134,7 @@ class BridgeCommandsTest(unittest.TestCase):
                 cli, "OverleafSession", DummySession
             ):
                 with working_directory(repo_root):
-                    result = self.runner.invoke(cli.main, ["bridge", "init", "--name", "Paper Project"])
+                    result = self.runner.invoke(cli.main, ["repo", "init", "--name", "Paper Project"])
 
             self.assertEqual(result.exit_code, 0, result.output)
             config_data = json.loads((repo_root / ".overleaf-sync.json").read_text(encoding="utf-8"))
@@ -164,7 +164,7 @@ class BridgeCommandsTest(unittest.TestCase):
                 cli, "OverleafSession", DummySession
             ), mock.patch.object(cli, "collect_sync_state", return_value=state):
                 with working_directory(repo_root):
-                    result = self.runner.invoke(cli.main, ["bridge", "status"])
+                    result = self.runner.invoke(cli.main, ["repo", "status"])
 
             self.assertEqual(result.exit_code, 0, result.output)
             self.assertIn("working_tree: dirty", result.output)
@@ -181,7 +181,7 @@ class BridgeCommandsTest(unittest.TestCase):
             (repo_root / "README.md").write_text("dirty\n", encoding="utf-8")
 
             with working_directory(repo_root):
-                result = self.runner.invoke(cli.main, ["bridge", "push-github"])
+                result = self.runner.invoke(cli.main, ["repo", "push-github"])
 
             self.assertNotEqual(result.exit_code, 0)
             self.assertIn("Working tree must be clean", result.output)
@@ -195,7 +195,7 @@ class BridgeCommandsTest(unittest.TestCase):
             (repo_root / "README.md").write_text("dirty\n", encoding="utf-8")
 
             with working_directory(repo_root):
-                result = self.runner.invoke(cli.main, ["bridge", "pull-overleaf"])
+                result = self.runner.invoke(cli.main, ["repo", "pull-overleaf"])
 
             self.assertNotEqual(result.exit_code, 0)
             self.assertIn("Working tree must be clean", result.output)
@@ -213,7 +213,7 @@ class BridgeCommandsTest(unittest.TestCase):
                 cli, "OverleafSession", DummySession
             ), mock.patch.object(cli, "sync_project") as sync_project:
                 with working_directory(repo_root):
-                    result = self.runner.invoke(cli.main, ["bridge", "push-overleaf"])
+                    result = self.runner.invoke(cli.main, ["repo", "push-overleaf"])
 
             self.assertEqual(result.exit_code, 0, result.output)
             sync_project.assert_called_once()
@@ -232,7 +232,7 @@ class BridgeCommandsTest(unittest.TestCase):
                 cli, "OverleafSession", DummySession
             ), mock.patch.object(cli, "sync_project") as sync_project:
                 with working_directory(repo_root):
-                    result = self.runner.invoke(cli.main, ["bridge", "pull-overleaf"])
+                    result = self.runner.invoke(cli.main, ["repo", "pull-overleaf"])
 
             self.assertEqual(result.exit_code, 0, result.output)
             sync_project.assert_called_once()
@@ -255,7 +255,7 @@ class BridgeCommandsTest(unittest.TestCase):
             write_bridge_config(repo_root)
 
             with working_directory(repo_root):
-                result = self.runner.invoke(cli.main, ["bridge", "push-github"])
+                result = self.runner.invoke(cli.main, ["repo", "push-github"])
 
             self.assertEqual(result.exit_code, 0, result.output)
             remote_count = git(["rev-list", "--count", "main"], cwd=remote_root).stdout.strip()
@@ -284,10 +284,14 @@ class BridgeCommandsTest(unittest.TestCase):
             git(["push", "origin", "main"], cwd=other_root)
 
             with working_directory(repo_root):
-                result = self.runner.invoke(cli.main, ["bridge", "pull-github"])
+                result = self.runner.invoke(cli.main, ["repo", "pull-github"])
 
             self.assertEqual(result.exit_code, 0, result.output)
             self.assertEqual((repo_root / "README.md").read_text(encoding="utf-8"), "remote update\n")
+
+    def test_bridge_alias_still_works(self) -> None:
+        result = self.runner.invoke(cli.main, ["bridge", "--help"])
+        self.assertEqual(result.exit_code, 0, result.output)
 
 
 if __name__ == "__main__":

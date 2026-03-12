@@ -1350,18 +1350,18 @@ def main(ctx: click.Context, local_only: bool, remote_only: bool, dry_run: bool,
     session.persist(cookie_path)
 
 
-@main.group(name="bridge")
-def bridge() -> None:
-    """Bridge Git workflows and Overleaf sync for an existing repository."""
+@main.group(name="repo")
+def repo() -> None:
+    """Manage a Git repository that syncs with GitHub and Overleaf."""
 
 
-@bridge.command(name="init")
+@repo.command(name="init")
 @click.option("-n", "--name", "project_name", default="", help="Overleaf project name. Defaults to the repository root name.")
 @click.option("--store-path", "store_path", default=DEFAULT_STORE_PATH, show_default=True, type=click.Path(exists=False), help="Path to the persisted Overleaf auth store, relative to the repository root.")
 @click.option("-p", "--path", "sync_path", default=".", show_default=True, type=click.Path(exists=False), help="Local sync path, relative to the repository root.")
 @click.option("-i", "--olignore", "olignore_path", default=DEFAULT_OLIGNORE, show_default=True, type=click.Path(exists=False), help="Path to .olignore, relative to the repository root.")
 @click.option("--git-remote", "git_remote", default=DEFAULT_GIT_REMOTE, show_default=True, help="Git remote used for GitHub operations.")
-def bridge_init(project_name: str, store_path: str, sync_path: str, olignore_path: str, git_remote: str) -> None:
+def repo_init(project_name: str, store_path: str, sync_path: str, olignore_path: str, git_remote: str) -> None:
     repo_root = find_repo_root()
     normalized_store_path = normalize_bridge_path(store_path, "store_path")
     normalized_sync_path = normalize_bridge_path(sync_path, "sync_path")
@@ -1398,8 +1398,8 @@ def bridge_init(project_name: str, store_path: str, sync_path: str, olignore_pat
     click.echo(f"default_branch: {config.default_branch}")
 
 
-@bridge.command(name="status")
-def bridge_status() -> None:
+@repo.command(name="status")
+def repo_status() -> None:
     repo_root = find_repo_root()
     config = load_bridge_config(repo_root)
     git_status = collect_git_status(
@@ -1430,8 +1430,8 @@ def bridge_status() -> None:
     session.persist(str(store_path))
 
 
-@bridge.command(name="push-github")
-def bridge_push_github() -> None:
+@repo.command(name="push-github")
+def repo_push_github() -> None:
     repo_root = find_repo_root()
     config = load_bridge_config(repo_root)
     git_status = collect_git_status(
@@ -1447,8 +1447,8 @@ def bridge_push_github() -> None:
     click.echo(output)
 
 
-@bridge.command(name="pull-github")
-def bridge_pull_github() -> None:
+@repo.command(name="pull-github")
+def repo_pull_github() -> None:
     repo_root = find_repo_root()
     config = load_bridge_config(repo_root)
     git_status = collect_git_status(
@@ -1464,8 +1464,8 @@ def bridge_pull_github() -> None:
     click.echo(output)
 
 
-@bridge.command(name="push-overleaf")
-def bridge_push_overleaf() -> None:
+@repo.command(name="push-overleaf")
+def repo_push_overleaf() -> None:
     repo_root = find_repo_root()
     config = load_bridge_config(repo_root)
     git_status = collect_git_status(
@@ -1480,8 +1480,8 @@ def bridge_push_overleaf() -> None:
     session.persist(str(store_path))
 
 
-@bridge.command(name="pull-overleaf")
-def bridge_pull_overleaf() -> None:
+@repo.command(name="pull-overleaf")
+def repo_pull_overleaf() -> None:
     repo_root = find_repo_root()
     config = load_bridge_config(repo_root)
     git_status = collect_git_status(
@@ -1495,6 +1495,9 @@ def bridge_pull_overleaf() -> None:
     session, project, store_path, sync_root, olignore_path = bridge_session_and_project(repo_root, config)
     sync_project(session, project, sync_root, olignore_path, local_only=False, remote_only=True)
     session.persist(str(store_path))
+
+
+main.add_command(repo, name="bridge")
 
 
 @main.command()
