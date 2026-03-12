@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest import mock
 
 import requests as reqs
+import click
 from click.testing import CliRunner
 
 from overleaf_sync import cli
@@ -85,6 +86,9 @@ class DummySession:
     def list_projects(self) -> list[dict]:
         return [{"lastUpdated": "2026-03-12", "name": "Demo Project"}]
 
+    def download_zip(self, project_id: str) -> bytes:
+        return b"PK\x05\x06" + b"\x00" * 18
+
     def persist(self, cookie_path: str) -> None:
         self.persisted_path = cookie_path
 
@@ -99,6 +103,9 @@ class BridgeHelpersTest(unittest.TestCase):
         self.assertEqual(parsed["ahead"], 2)
         self.assertEqual(parsed["behind"], 1)
         self.assertFalse(parsed["is_clean"])
+
+    def test_has_meaningful_git_changes_ignores_ovs_metadata_prefixes(self) -> None:
+        self.assertFalse(cli.has_meaningful_git_changes(["?? .ovs-base/cache.tex"], {".ovs-base"}))
 
     def test_write_and_load_bridge_config(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -339,13 +346,11 @@ class BridgeCommandsTest(unittest.TestCase):
 
             with working_directory(bind_root), mock.patch.object(cli, "load_store", return_value={"cookie": {}, "csrf": "token"}), mock.patch.object(
                 cli, "OverleafSession", DummySession
-            ), mock.patch.object(cli, "sync_project") as sync_project:
+            ), mock.patch.object(cli, "pull_bound_project") as pull_bound_project:
                 result = self.runner.invoke(cli.main, ["pull"])
 
             self.assertEqual(result.exit_code, 0, result.output)
-            sync_project.assert_called_once()
-            self.assertFalse(sync_project.call_args.kwargs["local_only"])
-            self.assertTrue(sync_project.call_args.kwargs["remote_only"])
+            pull_bound_project.assert_called_once()
 
     def test_status_uses_binding_when_name_omitted(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -606,6 +611,60 @@ class BridgeCommandsTest(unittest.TestCase):
 
 
 class SyncFallbackTest(unittest.TestCase):
+    def test_pull_bound_project_merges_non_overlapping_text_changes(self) -> None:
+        session = mock.Mock()
+        project = {"id": "project-1"}
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bind_root = Path(tmpdir)
+            sync_root = bind_root
+            olignore_path = sync_root / ".ovsignore"
+            olignore_path.write_text("", encoding="utf-8")
+            local_path = sync_root / "draft.tex"
+            local_path.write_text("a\nlocal\nc\nd\n", encoding="utf-8")
+            cli.write_base_snapshot(bind_root, "draft.tex", b"a\nb\nc\nd\n")
+            state = {
+                "local_files": {"draft.tex": local_path},
+                "remote_zip": {"draft.tex": b"a\nb\nc\nremote\n"},
+                "remote_folders": {},
+                "remote_entities": {"draft.tex": {"kind": "doc", "id": "doc-1", "path": "draft.tex"}},
+                "root_folder_id": "root",
+            }
+
+            with mock.patch.object(cli, "collect_sync_state", return_value=state):
+                cli.pull_bound_project(session, project, bind_root, sync_root, olignore_path)
+
+            self.assertEqual(local_path.read_text(encoding="utf-8"), "a\nlocal\nc\nremote\n")
+            self.assertEqual(cli.read_base_snapshot_map(bind_root)["draft.tex"], b"a\nb\nc\nremote\n")
+
+    def test_pull_bound_project_writes_conflict_markers_on_overlap(self) -> None:
+        session = mock.Mock()
+        project = {"id": "project-1"}
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bind_root = Path(tmpdir)
+            sync_root = bind_root
+            olignore_path = sync_root / ".ovsignore"
+            olignore_path.write_text("", encoding="utf-8")
+            local_path = sync_root / "draft.tex"
+            local_path.write_text("a\nlocal\n", encoding="utf-8")
+            cli.write_base_snapshot(bind_root, "draft.tex", b"a\nbase\n")
+            state = {
+                "local_files": {"draft.tex": local_path},
+                "remote_zip": {"draft.tex": b"a\nremote\n"},
+                "remote_folders": {},
+                "remote_entities": {"draft.tex": {"kind": "doc", "id": "doc-1", "path": "draft.tex"}},
+                "root_folder_id": "root",
+            }
+
+            with mock.patch.object(cli, "collect_sync_state", return_value=state):
+                with self.assertRaises(click.ClickException):
+                    cli.pull_bound_project(session, project, bind_root, sync_root, olignore_path)
+
+            merged = local_path.read_text(encoding="utf-8")
+            self.assertIn("<<<<<<<", merged)
+            self.assertIn("=======", merged)
+            self.assertIn(">>>>>>>", merged)
+            self.assertEqual(cli.read_base_snapshot_map(bind_root)["draft.tex"], b"a\nremote\n")
+
     def test_sync_project_warns_and_shows_progress(self) -> None:
         session = mock.Mock()
         session.upload_file.return_value = {"success": True, "entity_type": "file", "entity_id": "file-1"}

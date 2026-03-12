@@ -198,6 +198,7 @@ Most Overleaf scripts stop at "upload files". This one does not.
 - `add` writes a small local stage file and records both the local content hash and the remote content hash at staging time.
 - `push` can then reject stale stages when the Overleaf side changed after `ovs add`, instead of silently overwriting newer remote edits.
 - `pull` refuses to overwrite a folder that still has staged Overleaf updates pending.
+- `bind` and `repo init` capture a hidden remote merge base in `.ovs-base`, and `pull` uses that base for git-like three-way text merges.
 - GitHub operations use your existing local Git repository, its configured `origin`, and your local Git credentials.
 - Overleaf operations still use the auth store plus the current sync engine.
 - `repo init` writes `.overleaf-sync.json` into the Git repo root.
@@ -253,6 +254,11 @@ If you initialized the repo after a global `ovs login`, this auth path may point
 Created by `ovs add`. It stores the staged Overleaf paths plus the local/remote content fingerprints captured at staging time.
 `ovs push` uses it to detect when the remote file changed after staging.
 
+### `.ovs-base/`
+
+Created by `ovs bind`, `ovs repo init`, and refreshed after successful sync operations.
+It stores the last known remote snapshot used as the merge base for `ovs pull`.
+
 ## Security
 
 Do not commit these unless you know exactly why:
@@ -261,6 +267,7 @@ Do not commit these unless you know exactly why:
 - `.olauth`
 - `.overleaf-sync.json` if the repo/project mapping is sensitive
 - `.ovs-stage.json`
+- `.ovs-base/`
 - downloaded PDFs or compile artifacts if they contain private content
 
 This repository does not include any auth store, cookies, private Overleaf project data, or local export artifacts.
