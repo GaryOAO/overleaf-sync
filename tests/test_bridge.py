@@ -112,6 +112,38 @@ class BridgeHelpersTest(unittest.TestCase):
 
         self.assertEqual(request.call_args.kwargs["timeout"], cli.DOWNLOAD_ZIP_TIMEOUT)
 
+    def test_realtime_close_disconnects_even_if_socket_not_marked_connected(self) -> None:
+        client = cli.RealtimeProjectClient(mock.Mock(), "project-1")
+        socket = mock.Mock()
+        socket.connected = False
+        client.socket = socket
+
+        client.close()
+
+        socket.disconnect.assert_called_once_with()
+        self.assertIsNone(client.socket)
+
+    def test_realtime_close_leaves_active_docs_before_disconnect(self) -> None:
+        client = cli.RealtimeProjectClient(mock.Mock(), "project-1")
+        socket = mock.Mock()
+        socket.connected = False
+        client.socket = socket
+        client.active_doc_ids = {"doc-2", "doc-1"}
+
+        left_docs: list[str] = []
+
+        def fake_leave(doc_id: str) -> None:
+            left_docs.append(doc_id)
+            client.active_doc_ids.discard(doc_id)
+
+        with mock.patch.object(client, "leave_doc", side_effect=fake_leave) as leave_doc:
+            client.close()
+
+        self.assertEqual(left_docs, ["doc-1", "doc-2"])
+        self.assertEqual(leave_doc.call_count, 2)
+        socket.disconnect.assert_called_once_with()
+        self.assertEqual(client.active_doc_ids, set())
+
 
 class BridgeCommandsTest(unittest.TestCase):
     def setUp(self) -> None:
