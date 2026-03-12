@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.venv/
+venv/
+dist/
+build/
+.DS_Store
+.overleaf-sync-auth
+.olauth
+.olignore
+output/
+olsync-src/
