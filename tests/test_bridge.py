@@ -14,6 +14,8 @@ import click
 from click.testing import CliRunner
 
 from overleaf_sync import cli
+from overleaf_sync import git_bridge
+from overleaf_sync import sync_engine
 
 
 def git(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
@@ -165,6 +167,16 @@ class BridgeHelpersTest(unittest.TestCase):
                 session.download_zip("project-1")
 
         self.assertEqual(request.call_args.kwargs["timeout"], cli.DOWNLOAD_ZIP_TIMEOUT)
+
+    def test_run_git_command_reports_missing_git_binary(self) -> None:
+        with mock.patch.object(git_bridge.subprocess, "run", side_effect=FileNotFoundError):
+            with self.assertRaises(click.ClickException):
+                cli.run_git_command(["status"])
+
+    def test_merge_text_three_way_reports_missing_git_binary(self) -> None:
+        with mock.patch.object(sync_engine.subprocess, "run", side_effect=FileNotFoundError):
+            with self.assertRaises(click.ClickException):
+                cli.merge_text_three_way("base\n", "local\n", "remote\n")
 
     def test_build_destructive_sync_warnings(self) -> None:
         warnings = cli.build_destructive_sync_warnings(
@@ -452,11 +464,54 @@ class BridgeCommandsTest(unittest.TestCase):
 
             with working_directory(bind_root), mock.patch.object(cli, "load_store", return_value={"cookie": {}, "csrf": "token"}), mock.patch.object(
                 cli, "OverleafSession", DummySession
-            ), mock.patch.object(cli, "collect_sync_state", return_value=state):
+            ), mock.patch.object(sync_engine, "collect_sync_state", return_value=state):
                 result = self.runner.invoke(cli.main, ["push"])
 
             self.assertNotEqual(result.exit_code, 0)
             self.assertIn("Remote content changed after `ovs add`", result.output)
+
+    def test_push_rejects_unresolved_conflicts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bind_root = Path(tmpdir)
+            (bind_root / ".overleaf-sync-auth").write_bytes(b"auth")
+            write_bridge_config(bind_root, project_name="Bound Project")
+            cli.set_conflict_entry(bind_root, "draft.tex", b"local\n", b"remote\n")
+
+            with working_directory(bind_root):
+                result = self.runner.invoke(cli.main, ["push"])
+
+            self.assertNotEqual(result.exit_code, 0)
+            self.assertIn("Unresolved Overleaf conflicts exist", result.output)
+
+    def test_resolve_ours_restores_local_version(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bind_root = Path(tmpdir)
+            local_path = bind_root / "draft.tex"
+            local_path.write_text("<<<<<<< local\nconflict\n=======\nremote\n>>>>>>> remote\n", encoding="utf-8")
+            write_bridge_config(bind_root, project_name="Bound Project")
+            cli.set_conflict_entry(bind_root, "draft.tex", b"local\n", b"remote\n")
+
+            with working_directory(bind_root):
+                result = self.runner.invoke(cli.main, ["resolve", "--ours", "draft.tex"])
+
+            self.assertEqual(result.exit_code, 0, result.output)
+            self.assertEqual(local_path.read_text(encoding="utf-8"), "local\n")
+            self.assertEqual(cli.load_conflict_entries(bind_root), {})
+
+    def test_resolve_mark_resolved_keeps_manual_file_and_clears_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            bind_root = Path(tmpdir)
+            local_path = bind_root / "draft.tex"
+            local_path.write_text("manually resolved\n", encoding="utf-8")
+            write_bridge_config(bind_root, project_name="Bound Project")
+            cli.set_conflict_entry(bind_root, "draft.tex", b"local\n", b"remote\n")
+
+            with working_directory(bind_root):
+                result = self.runner.invoke(cli.main, ["resolve", "--mark-resolved", "draft.tex"])
+
+            self.assertEqual(result.exit_code, 0, result.output)
+            self.assertEqual(local_path.read_text(encoding="utf-8"), "manually resolved\n")
+            self.assertEqual(cli.load_conflict_entries(bind_root), {})
 
     def test_bridge_status_reports_git_and_overleaf_state(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -546,14 +601,12 @@ class BridgeCommandsTest(unittest.TestCase):
 
             with mock.patch.object(cli, "load_store", return_value={"cookie": {}, "csrf": "token"}), mock.patch.object(
                 cli, "OverleafSession", DummySession
-            ), mock.patch.object(cli, "sync_project") as sync_project:
+            ), mock.patch.object(cli, "pull_bound_project") as pull_bound_project:
                 with working_directory(repo_root):
                     result = self.runner.invoke(cli.main, ["repo", "pull-overleaf"])
 
             self.assertEqual(result.exit_code, 0, result.output)
-            sync_project.assert_called_once()
-            self.assertFalse(sync_project.call_args.kwargs["local_only"])
-            self.assertTrue(sync_project.call_args.kwargs["remote_only"])
+            pull_bound_project.assert_called_once()
 
     def test_bridge_push_github_pushes_to_remote(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -630,7 +683,7 @@ class SyncFallbackTest(unittest.TestCase):
                 "root_folder_id": "root",
             }
 
-            with mock.patch.object(cli, "collect_sync_state", return_value=state):
+            with mock.patch.object(sync_engine, "collect_sync_state", return_value=state):
                 cli.pull_bound_project(session, project, bind_root, sync_root, olignore_path)
 
             self.assertEqual(local_path.read_text(encoding="utf-8"), "a\nlocal\nc\nremote\n")
@@ -655,7 +708,7 @@ class SyncFallbackTest(unittest.TestCase):
                 "root_folder_id": "root",
             }
 
-            with mock.patch.object(cli, "collect_sync_state", return_value=state):
+            with mock.patch.object(sync_engine, "collect_sync_state", return_value=state):
                 with self.assertRaises(click.ClickException):
                     cli.pull_bound_project(session, project, bind_root, sync_root, olignore_path)
 
@@ -664,6 +717,7 @@ class SyncFallbackTest(unittest.TestCase):
             self.assertIn("=======", merged)
             self.assertIn(">>>>>>>", merged)
             self.assertEqual(cli.read_base_snapshot_map(bind_root)["draft.tex"], b"a\nremote\n")
+            self.assertIn("draft.tex", cli.load_conflict_entries(bind_root))
 
     def test_sync_project_warns_and_shows_progress(self) -> None:
         session = mock.Mock()
@@ -690,10 +744,18 @@ class SyncFallbackTest(unittest.TestCase):
                 "remote_zip_available": True,
             }
 
-            with mock.patch.object(cli, "collect_sync_state", return_value=state), mock.patch.object(
-                cli, "ensure_remote_folder", return_value="root"
-            ), mock.patch.object(cli, "LARGE_FILE_WARNING_BYTES", 4), mock.patch.object(cli.click, "echo") as echo:
-                cli.sync_project(session, project, sync_root, olignore_path, local_only=True, remote_only=False)
+            with mock.patch.object(sync_engine, "collect_sync_state", return_value=state), mock.patch.object(
+                sync_engine, "ensure_remote_folder", return_value="root"
+            ), mock.patch.object(sync_engine, "LARGE_FILE_WARNING_BYTES", 4), mock.patch.object(cli.click, "echo") as echo:
+                cli.sync_project(
+                    session,
+                    project,
+                    sync_root,
+                    olignore_path,
+                    local_only=True,
+                    remote_only=False,
+                    realtime_factory=cli.RealtimeProjectClient,
+                )
 
         messages = [call.args[0] for call in echo.call_args_list]
         self.assertIn("[WARN] Local-only sync will delete 1 remote file(s) and 1 remote folder(s) not present locally.", messages)
@@ -711,11 +773,19 @@ class SyncFallbackTest(unittest.TestCase):
             olignore_path.write_text("", encoding="utf-8")
 
             with mock.patch.object(
-                cli,
+                sync_engine,
                 "collect_sync_state",
                 side_effect=cli.RemoteZipDownloadError("zip export stalled"),
-            ), mock.patch.object(cli, "sync_project_local_only_fallback") as fallback:
-                cli.sync_project(session, project, sync_root, olignore_path, local_only=True, remote_only=False)
+            ), mock.patch.object(sync_engine, "sync_project_local_only_fallback") as fallback:
+                cli.sync_project(
+                    session,
+                    project,
+                    sync_root,
+                    olignore_path,
+                    local_only=True,
+                    remote_only=False,
+                    realtime_factory=cli.RealtimeProjectClient,
+                )
 
         fallback.assert_called_once()
         self.assertIs(fallback.call_args.args[0], session)
@@ -733,12 +803,20 @@ class SyncFallbackTest(unittest.TestCase):
             olignore_path.write_text("", encoding="utf-8")
 
             with mock.patch.object(
-                cli,
+                sync_engine,
                 "collect_sync_state",
                 side_effect=cli.RemoteZipDownloadError("zip export stalled"),
             ):
                 with self.assertRaises(cli.RemoteZipDownloadError):
-                    cli.sync_project(session, project, sync_root, olignore_path, local_only=False, remote_only=True)
+                    cli.sync_project(
+                        session,
+                        project,
+                        sync_root,
+                        olignore_path,
+                        local_only=False,
+                        remote_only=True,
+                        realtime_factory=cli.RealtimeProjectClient,
+                    )
 
 
 if __name__ == "__main__":
