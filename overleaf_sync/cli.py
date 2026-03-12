@@ -670,56 +670,143 @@ def prompt_conflict(path: str, local_only: bool, remote_only: bool) -> str:
     )
 
 
-def sync_project(session: OverleafSession, project: dict, sync_path: Path, olignore_path: Path, local_only: bool, remote_only: bool) -> None:
+def file_contents_match(local_path: Path, remote_bytes: bytes, remote_entity: dict | None) -> bool:
+    if remote_entity is not None and remote_entity["kind"] == "doc":
+        try:
+            return read_local_text(local_path) == normalize_text_content(remote_bytes.decode("utf-8-sig"))
+        except UnicodeDecodeError:
+            return local_path.read_bytes() == remote_bytes
+    return local_path.read_bytes() == remote_bytes
+
+
+def collect_sync_state(session: OverleafSession, project: dict, sync_path: Path, olignore_path: Path) -> dict:
     patterns = ignore_patterns(olignore_path)
     local_files = collect_local_files(sync_path, patterns)
     remote_zip = zip_map(session.download_zip(project["id"]))
     remote_folders, remote_entities, root_folder_id = session.extract_tree(project["id"])
+    return {
+        "local_files": local_files,
+        "remote_zip": remote_zip,
+        "remote_folders": remote_folders,
+        "remote_entities": remote_entities,
+        "root_folder_id": root_folder_id,
+    }
+
+
+def build_sync_plan(
+    local_files: dict[str, Path],
+    remote_zip: dict[str, bytes],
+    remote_entities: dict[str, dict],
+    remote_folders: dict[str, dict],
+    local_only: bool,
+    remote_only: bool,
+) -> dict[str, list[str]]:
+    plan = {
+        "push_new": [],
+        "push_replace": [],
+        "pull_new": [],
+        "pull_replace": [],
+        "local_delete": [],
+        "remote_delete": [],
+        "remote_delete_folders": [],
+        "conflicts": [],
+    }
 
     all_paths = sorted(set(local_files) | set(remote_zip))
-    push_updates = []
-    pull_updates = []
-
     for path in all_paths:
         local_path = local_files.get(path)
         remote_bytes = remote_zip.get(path)
         remote_entity = remote_entities.get(path)
 
         if local_path and remote_bytes is not None:
-            if remote_entity is not None and remote_entity["kind"] == "doc":
-                try:
-                    if read_local_text(local_path) == normalize_text_content(remote_bytes.decode("utf-8-sig")):
-                        continue
-                except UnicodeDecodeError:
-                    if local_path.read_bytes() == remote_bytes:
-                        continue
+            if file_contents_match(local_path, remote_bytes, remote_entity):
+                continue
+            if local_only:
+                plan["push_replace"].append(path)
+            elif remote_only:
+                plan["pull_replace"].append(path)
             else:
-                if local_path.read_bytes() == remote_bytes:
-                    continue
-            choice = prompt_conflict(path, local_only, remote_only)
-            if choice in ("l", "local"):
-                push_updates.append(path)
-            else:
-                pull_updates.append(path)
+                plan["conflicts"].append(path)
             continue
 
         if local_path and remote_bytes is None:
             if remote_only:
-                remove_local_file(sync_path / path)
-                click.echo(f"[LOCAL DELETE] {path}")
-                continue
-            push_updates.append(path)
+                plan["local_delete"].append(path)
+            else:
+                plan["push_new"].append(path)
             continue
 
         if local_path is None and remote_bytes is not None:
             if local_only:
-                entity = remote_entities.get(path)
-                if entity:
-                    session.delete_entity(project["id"], entity)
-                    remote_entities.pop(path, None)
-                    click.echo(f"[REMOTE DELETE] {path}")
+                plan["remote_delete"].append(path)
+            else:
+                plan["pull_new"].append(path)
+
+    if local_only:
+        desired_folders = collect_folder_paths(local_files)
+        for folder_path in sorted(remote_folders, key=lambda item: item.count("/"), reverse=True):
+            if folder_path in desired_folders:
                 continue
+            plan["remote_delete_folders"].append(folder_path)
+
+    return plan
+
+
+def print_sync_plan(plan: dict[str, list[str]]) -> None:
+    labels = [
+        ("push_new", "[PLAN LOCAL -> REMOTE NEW]"),
+        ("push_replace", "[PLAN LOCAL -> REMOTE REPLACE]"),
+        ("pull_new", "[PLAN REMOTE -> LOCAL NEW]"),
+        ("pull_replace", "[PLAN REMOTE -> LOCAL REPLACE]"),
+        ("local_delete", "[PLAN LOCAL DELETE]"),
+        ("remote_delete", "[PLAN REMOTE DELETE]"),
+        ("remote_delete_folders", "[PLAN REMOTE DELETE FOLDER]"),
+        ("conflicts", "[PLAN CONFLICT]"),
+    ]
+    total = sum(len(plan[key]) for key, _ in labels)
+    if total == 0:
+        click.echo("No sync actions needed.")
+        return
+
+    for key, label in labels:
+        for path in plan[key]:
+            click.echo(f"{label} {path}")
+
+    click.echo(
+        "Summary: "
+        + ", ".join(f"{key}={len(plan[key])}" for key, _ in labels if plan[key])
+    )
+
+
+def sync_project(session: OverleafSession, project: dict, sync_path: Path, olignore_path: Path, local_only: bool, remote_only: bool) -> None:
+    state = collect_sync_state(session, project, sync_path, olignore_path)
+    local_files = state["local_files"]
+    remote_zip = state["remote_zip"]
+    remote_folders = state["remote_folders"]
+    remote_entities = state["remote_entities"]
+    root_folder_id = state["root_folder_id"]
+
+    plan = build_sync_plan(local_files, remote_zip, remote_entities, remote_folders, local_only, remote_only)
+    push_updates = list(plan["push_new"]) + list(plan["push_replace"])
+    pull_updates = list(plan["pull_new"]) + list(plan["pull_replace"])
+
+    for path in plan["conflicts"]:
+        choice = prompt_conflict(path, local_only, remote_only)
+        if choice in ("l", "local"):
+            push_updates.append(path)
+        else:
             pull_updates.append(path)
+
+    for path in plan["local_delete"]:
+        remove_local_file(sync_path / path)
+        click.echo(f"[LOCAL DELETE] {path}")
+
+    for path in plan["remote_delete"]:
+        entity = remote_entities.get(path)
+        if entity:
+            session.delete_entity(project["id"], entity)
+            remote_entities.pop(path, None)
+            click.echo(f"[REMOTE DELETE] {path}")
 
     for path in pull_updates:
         write_local_file(sync_path / path, remote_zip[path])
@@ -759,24 +846,21 @@ def sync_project(session: OverleafSession, project: dict, sync_path: Path, olign
         if realtime is not None:
             realtime.close()
 
-    if local_only:
-        desired_folders = collect_folder_paths(local_files)
-        for folder_path in sorted(remote_folders, key=lambda item: item.count("/"), reverse=True):
-            if folder_path in desired_folders:
-                continue
-            session.delete_entity(project["id"], remote_folders[folder_path])
-            click.echo(f"[REMOTE DELETE FOLDER] {folder_path}")
+    for folder_path in plan["remote_delete_folders"]:
+        session.delete_entity(project["id"], remote_folders[folder_path])
+        click.echo(f"[REMOTE DELETE FOLDER] {folder_path}")
 
 
 @click.group(invoke_without_command=True)
 @click.option("-l", "--local-only", "local_only", is_flag=True, help="Sync local files to Overleaf.")
 @click.option("-r", "--remote-only", "remote_only", is_flag=True, help="Sync remote files to local.")
+@click.option("--dry-run", "dry_run", is_flag=True, help="Show planned sync actions without applying them.")
 @click.option("-n", "--name", "project_name", default="", help="Overleaf project name.")
 @click.option("--store-path", "cookie_path", default=".overleaf-sync-auth", show_default=True, type=click.Path(exists=False), help="Path to the persisted Overleaf auth store.")
 @click.option("-p", "--path", "sync_path", default=".", type=click.Path(exists=True), help="Local sync path.")
 @click.option("-i", "--olignore", "olignore_path", default=".olignore", type=click.Path(exists=False), help="Path to .olignore relative to sync path.")
 @click.pass_context
-def main(ctx: click.Context, local_only: bool, remote_only: bool, project_name: str, cookie_path: str, sync_path: str, olignore_path: str) -> None:
+def main(ctx: click.Context, local_only: bool, remote_only: bool, dry_run: bool, project_name: str, cookie_path: str, sync_path: str, olignore_path: str) -> None:
     if ctx.invoked_subcommand is not None:
         return
 
@@ -789,6 +873,19 @@ def main(ctx: click.Context, local_only: bool, remote_only: bool, project_name: 
     sync_root = Path(sync_path).resolve()
     project_name = project_name or sync_root.name
     project = session.get_project(project_name)
+    if dry_run:
+        state = collect_sync_state(session, project, sync_root, sync_root / olignore_path)
+        plan = build_sync_plan(
+            state["local_files"],
+            state["remote_zip"],
+            state["remote_entities"],
+            state["remote_folders"],
+            local_only,
+            remote_only,
+        )
+        print_sync_plan(plan)
+        session.persist(cookie_path)
+        return
     sync_project(session, project, sync_root, sync_root / olignore_path, local_only, remote_only)
     session.persist(cookie_path)
 
@@ -834,6 +931,36 @@ def download_pdf(project_name: str, download_path: str, cookie_path: str) -> Non
     output_path.write_bytes(content)
     session.persist(cookie_path)
     click.echo(f"Downloaded PDF to {output_path}")
+
+
+@main.command(name="status")
+@click.option("-l", "--local-only", "local_only", is_flag=True, help="Show the plan for local-only sync.")
+@click.option("-r", "--remote-only", "remote_only", is_flag=True, help="Show the plan for remote-only sync.")
+@click.option("-n", "--name", "project_name", default="", help="Overleaf project name.")
+@click.option("--store-path", "cookie_path", default=".overleaf-sync-auth", show_default=True, type=click.Path(exists=False), help="Path to the persisted Overleaf auth store.")
+@click.option("-p", "--path", "sync_path", default=".", type=click.Path(exists=True), help="Local sync path.")
+@click.option("-i", "--olignore", "olignore_path", default=".olignore", type=click.Path(exists=False), help="Path to .olignore relative to sync path.")
+def status(local_only: bool, remote_only: bool, project_name: str, cookie_path: str, sync_path: str, olignore_path: str) -> None:
+    if local_only and remote_only:
+        raise click.ClickException("Use at most one of --local-only and --remote-only.")
+    if not os.path.isfile(cookie_path):
+        raise click.ClickException("Persisted Overleaf auth store not found. Run `overleaf-sync login` first.")
+
+    session = OverleafSession(load_store(cookie_path))
+    sync_root = Path(sync_path).resolve()
+    project_name = project_name or sync_root.name
+    project = session.get_project(project_name)
+    state = collect_sync_state(session, project, sync_root, sync_root / olignore_path)
+    plan = build_sync_plan(
+        state["local_files"],
+        state["remote_zip"],
+        state["remote_entities"],
+        state["remote_folders"],
+        local_only,
+        remote_only,
+    )
+    print_sync_plan(plan)
+    session.persist(cookie_path)
 
 
 if __name__ == "__main__":
