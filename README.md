@@ -14,7 +14,7 @@
 </p>
 
 <p align="center">
-  <code>bind + push/pull</code> · <code>staged Overleaf updates</code> · <code>remote tree</code> · <code>GitHub + Overleaf repo workflow</code>
+  <code>bind + push/pull/resolve</code> · <code>staged Overleaf updates</code> · <code>remote tree</code> · <code>GitHub + Overleaf repo workflow</code>
 </p>
 
 Overleaf Sync is a CLI for working with an existing Overleaf project from a local folder or a local Git repository.
@@ -22,7 +22,7 @@ Overleaf Sync is a CLI for working with an existing Overleaf project from a loca
 It focuses on three jobs:
 
 - exact folder sync between your working tree and Overleaf
-- a git-like bound workflow with `bind`, `add`, `push`, `pull`, `status`
+- a git-like bound workflow with `bind`, `add`, `push`, `pull`, `resolve`, `status`
 - access to compile outputs beyond `output.pdf`
 - a repo workflow where GitHub and Overleaf are driven from one local checkout
 - warnings before destructive sync actions and step-by-step progress during sync
@@ -46,6 +46,7 @@ flowchart LR
 | stage selected paths before pushing to Overleaf | `ovs add path/to/file.tex` |
 | push staged paths or all bound changes | `ovs push` |
 | pull remote changes into the bound folder | `ovs pull` |
+| inspect or resolve pull conflicts | `ovs resolve`, `ovs resolve --ours path.tex` |
 | push local files to Overleaf | `ovs -l --name "Project"` |
 | pull remote files to local | `ovs -r --name "Project"` |
 | preview sync actions first | `ovs --dry-run ...` or `ovs status ...` |
@@ -98,6 +99,12 @@ ovs push
 
 # Pull remote changes later
 ovs pull
+
+# If pull reports conflicts
+ovs resolve
+ovs resolve --ours sections/intro.tex
+ovs resolve --theirs sections/intro.tex
+ovs resolve --mark-resolved sections/intro.tex
 
 # Push local files to Overleaf
 ovs -l --name "My Overleaf Project"
@@ -163,6 +170,7 @@ ovs repo pull-overleaf
 - `ovs reset`
 - `ovs push`
 - `ovs pull`
+- `ovs resolve`
 - `ovs login`
 - `ovs list`
 - `ovs -l`
@@ -199,6 +207,7 @@ Most Overleaf scripts stop at "upload files". This one does not.
 - `push` can then reject stale stages when the Overleaf side changed after `ovs add`, instead of silently overwriting newer remote edits.
 - `pull` refuses to overwrite a folder that still has staged Overleaf updates pending.
 - `bind` and `repo init` capture a hidden remote merge base in `.ovs-base`, and `pull` uses that base for git-like three-way text merges.
+- unresolved pull conflicts are recorded locally and must be closed with `ovs resolve --ours`, `--theirs`, or `--mark-resolved`
 - GitHub operations use your existing local Git repository, its configured `origin`, and your local Git credentials.
 - Overleaf operations still use the auth store plus the current sync engine.
 - `repo init` writes `.overleaf-sync.json` into the Git repo root.
@@ -258,6 +267,22 @@ Created by `ovs add`. It stores the staged Overleaf paths plus the local/remote 
 
 Created by `ovs bind`, `ovs repo init`, and refreshed after successful sync operations.
 It stores the last known remote snapshot used as the merge base for `ovs pull`.
+
+### `.ovs-conflicts.json` and `.ovs-conflicts/`
+
+Created when `ovs pull` cannot complete cleanly.
+They store unresolved conflict paths plus the saved `ours` / `theirs` snapshots used by `ovs resolve`.
+
+## Architecture
+
+The implementation is now split around product boundaries instead of one growing script:
+
+- [`overleaf_sync/local_state.py`](/Users/sunyukun/Documents/overleaf-sync/overleaf_sync/local_state.py) for `.ovs-*` workspace metadata
+- [`overleaf_sync/sync_engine.py`](/Users/sunyukun/Documents/overleaf-sync/overleaf_sync/sync_engine.py) for diff, merge, push/pull, and conflict orchestration
+- [`overleaf_sync/git_bridge.py`](/Users/sunyukun/Documents/overleaf-sync/overleaf_sync/git_bridge.py) for repo binding and Git policy
+- [`overleaf_sync/cli.py`](/Users/sunyukun/Documents/overleaf-sync/overleaf_sync/cli.py) for command wiring and Overleaf transport/client behavior
+
+See [docs/architecture.md](/Users/sunyukun/Documents/overleaf-sync/docs/architecture.md) for the product-slice view.
 
 ## Security
 
