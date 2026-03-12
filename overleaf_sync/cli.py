@@ -46,6 +46,7 @@ LEGACY_STORE_PATHS = (
 )
 GLOBAL_STORE_FILENAME = "auth-store.pkl"
 STAGE_FILE_NAME = ".ovs-stage.json"
+BASE_SNAPSHOT_DIR = ".ovs-base"
 DEFAULT_REQUEST_TIMEOUT = (10, 30)
 DOWNLOAD_ZIP_TIMEOUT = (10, 60)
 LARGE_FILE_WARNING_BYTES = 10 * 1024 * 1024
@@ -55,6 +56,7 @@ LOCAL_BRIDGE_METADATA_FILES = {
     ".olauth",
     STAGE_FILE_NAME,
     DEFAULT_OLIGNORE,
+    BASE_SNAPSHOT_DIR,
 }
 AUTH_STORE_OPTION_DEFAULT = "local .overleaf-sync-auth/.olauth, else saved global auth"
 LOGIN_STORE_OPTION_DEFAULT = "saved global auth"
@@ -245,6 +247,77 @@ def stage_file_path(root: Path) -> Path:
     return root / STAGE_FILE_NAME
 
 
+def base_snapshot_root(root: Path) -> Path:
+    return root / BASE_SNAPSHOT_DIR
+
+
+def base_snapshot_path(root: Path, rel_path: str) -> Path:
+    return base_snapshot_root(root) / Path(rel_path)
+
+
+def read_base_snapshot_map(root: Path) -> dict[str, bytes]:
+    snapshot_root = base_snapshot_root(root)
+    if not snapshot_root.exists():
+        return {}
+    result: dict[str, bytes] = {}
+    for file_path in snapshot_root.rglob("*"):
+        if file_path.is_file():
+            result[file_path.relative_to(snapshot_root).as_posix()] = file_path.read_bytes()
+    return result
+
+
+def write_base_snapshot(root: Path, rel_path: str, content: bytes) -> None:
+    path = base_snapshot_path(root, rel_path)
+    ensure_local_dir(path)
+    path.write_bytes(content)
+
+
+def remove_base_snapshot(root: Path, rel_path: str) -> None:
+    path = base_snapshot_path(root, rel_path)
+    if path.exists():
+        path.unlink()
+    parent = path.parent
+    snapshot_root = base_snapshot_root(root)
+    while parent != snapshot_root and parent.exists():
+        try:
+            parent.rmdir()
+        except OSError:
+            break
+        parent = parent.parent
+
+
+def replace_base_snapshot(root: Path, file_map: dict[str, bytes]) -> None:
+    snapshot_root = base_snapshot_root(root)
+    if snapshot_root.exists():
+        for existing in sorted(snapshot_root.rglob("*"), reverse=True):
+            if existing.is_file():
+                existing.unlink()
+            else:
+                try:
+                    existing.rmdir()
+                except OSError:
+                    pass
+    if not file_map:
+        return
+    for rel_path, content in file_map.items():
+        write_base_snapshot(root, rel_path, content)
+
+
+def replace_base_snapshot_from_local(root: Path, sync_root: Path, olignore_path: Path) -> None:
+    patterns = ignore_patterns(olignore_path)
+    local_files = collect_local_files(sync_root, patterns)
+    replace_base_snapshot(root, {rel_path: local_path.read_bytes() for rel_path, local_path in local_files.items()})
+
+
+def update_base_snapshot_from_local_paths(root: Path, sync_root: Path, rel_paths: set[str]) -> None:
+    for rel_path in rel_paths:
+        local_path = sync_root / rel_path
+        if local_path.is_file():
+            write_base_snapshot(root, rel_path, local_path.read_bytes())
+        else:
+            remove_base_snapshot(root, rel_path)
+
+
 def load_stage_entries(root: Path) -> dict[str, dict[str, str | None]]:
     path = stage_file_path(root)
     if not path.is_file():
@@ -432,12 +505,16 @@ def status_entry_path(entry: str) -> str:
     return path
 
 
+def is_ignored_untracked_path(path: str, ignored: set[str]) -> bool:
+    return any(path == item or path.startswith(f"{item}/") for item in ignored)
+
+
 def has_meaningful_git_changes(entries: list[str], ignored_untracked_paths: set[str] | None = None) -> bool:
     ignored = LOCAL_BRIDGE_METADATA_FILES | (ignored_untracked_paths or set())
     for entry in entries:
         code = entry[:2]
         path = status_entry_path(entry)
-        if code == "??" and path in ignored:
+        if code == "??" and is_ignored_untracked_path(path, ignored):
             continue
         return True
     return False
@@ -472,7 +549,7 @@ def display_store_config_path(repo_root: Path, store_path: Path) -> str:
 
 
 def bridge_ignored_untracked_paths(repo_root: Path, config: BridgeConfig) -> set[str]:
-    ignored = {BRIDGE_CONFIG_NAME}
+    ignored = {BRIDGE_CONFIG_NAME, STAGE_FILE_NAME, BASE_SNAPSHOT_DIR, DEFAULT_OLIGNORE}
     store_path = Path(config.store_path).expanduser()
     if store_path.is_absolute():
         try:
@@ -730,6 +807,26 @@ def normalize_text_content(text: str) -> str:
     return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
+def decode_text_bytes(content: bytes) -> str:
+    return normalize_text_content(content.decode("utf-8-sig"))
+
+
+def encode_text_content(text: str) -> bytes:
+    return normalize_text_content(text).encode("utf-8")
+
+
+def is_text_bytes(content: bytes | None) -> bool:
+    if content is None:
+        return True
+    if b"\x00" in content:
+        return False
+    try:
+        decode_text_bytes(content)
+    except UnicodeDecodeError:
+        return False
+    return True
+
+
 def read_local_text(local_path: Path) -> str:
     return normalize_text_content(local_path.read_text(encoding="utf-8-sig"))
 
@@ -750,6 +847,41 @@ def repair_socket_text(text: str) -> str:
 
 def snapshot_lines_to_text(lines: list[str]) -> str:
     return "\n".join(repair_socket_text(line) for line in lines)
+
+
+def render_conflict_text(local_text: str, remote_text: str, *, local_label: str = "local", remote_label: str = "remote") -> str:
+    local_block = local_text.rstrip("\n")
+    remote_block = remote_text.rstrip("\n")
+    return (
+        f"<<<<<<< {local_label}\n"
+        f"{local_block}\n"
+        "=======\n"
+        f"{remote_block}\n"
+        f">>>>>>> {remote_label}\n"
+    )
+
+
+def merge_text_three_way(base_text: str, local_text: str, remote_text: str) -> tuple[str, bool]:
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmp_root = Path(tmpdir)
+        local_path = tmp_root / "local.txt"
+        base_path = tmp_root / "base.txt"
+        remote_path = tmp_root / "remote.txt"
+        local_path.write_text(normalize_text_content(local_text), encoding="utf-8")
+        base_path.write_text(normalize_text_content(base_text), encoding="utf-8")
+        remote_path.write_text(normalize_text_content(remote_text), encoding="utf-8")
+        result = subprocess.run(
+            ["git", "merge-file", "-p", str(local_path), str(base_path), str(remote_path)],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if result.returncode not in {0, 1}:
+            message = result.stderr.strip() or result.stdout.strip() or "git merge-file failed."
+            raise click.ClickException(message)
+        return result.stdout, result.returncode == 0
 
 
 def build_text_components(current_text: str, target_text: str) -> list[dict]:
@@ -1812,6 +1944,80 @@ def push_staged_entries(
     return pushed
 
 
+def pull_bound_project(
+    session: OverleafSession,
+    project: dict,
+    binding_root: Path,
+    sync_root: Path,
+    olignore_path: Path,
+) -> None:
+    state = collect_sync_state(session, project, sync_root, olignore_path)
+    local_files = state["local_files"]
+    remote_zip = state["remote_zip"]
+    base_map = read_base_snapshot_map(binding_root)
+    all_paths = sorted(set(local_files) | set(remote_zip) | set(base_map))
+    conflicts: list[str] = []
+
+    for rel_path in all_paths:
+        local_path = local_files.get(rel_path)
+        local_bytes = local_path.read_bytes() if local_path is not None else None
+        remote_bytes = remote_zip.get(rel_path)
+        base_bytes = base_map.get(rel_path)
+
+        if local_bytes == remote_bytes:
+            continue
+        if remote_bytes == base_bytes:
+            # Remote unchanged since the last known sync point; keep local edits.
+            continue
+        if local_bytes == base_bytes:
+            if remote_bytes is None:
+                remove_local_file(sync_root / rel_path)
+                click.echo(f"[REMOTE DELETE] {rel_path}")
+            else:
+                write_local_file(sync_root / rel_path, remote_bytes)
+                click.echo(f"[REMOTE -> LOCAL] {rel_path}")
+            continue
+
+        if local_bytes is None and base_bytes is None and remote_bytes is not None:
+            write_local_file(sync_root / rel_path, remote_bytes)
+            click.echo(f"[REMOTE -> LOCAL NEW] {rel_path}")
+            continue
+        if local_bytes is not None and remote_bytes is None and base_bytes is None:
+            # Local-only file with no remote history; keep it.
+            continue
+
+        if not (is_text_bytes(base_bytes) and is_text_bytes(local_bytes) and is_text_bytes(remote_bytes)):
+            conflicts.append(rel_path)
+            click.echo(f"[CONFLICT binary] {rel_path}")
+            continue
+
+        local_text = decode_text_bytes(local_bytes) if local_bytes is not None else ""
+        remote_text = decode_text_bytes(remote_bytes) if remote_bytes is not None else ""
+        base_text = decode_text_bytes(base_bytes) if base_bytes is not None else ""
+        if remote_bytes is None or local_bytes is None:
+            merged_text = render_conflict_text(
+                local_text if local_bytes is not None else "",
+                remote_text if remote_bytes is not None else "",
+                local_label="local",
+                remote_label="remote",
+            )
+            clean = False
+        else:
+            merged_text, clean = merge_text_three_way(base_text, local_text, remote_text)
+        write_local_file(sync_root / rel_path, encode_text_content(merged_text))
+        if clean:
+            click.echo(f"[MERGED] {rel_path}")
+        else:
+            conflicts.append(rel_path)
+            click.echo(f"[CONFLICT] {rel_path}")
+
+    replace_base_snapshot(binding_root, remote_zip)
+    if conflicts:
+        raise click.ClickException(
+            f"Pull completed with conflicts in {len(conflicts)} path(s): {', '.join(conflicts)}"
+        )
+
+
 def bridge_session_and_project(repo_root: Path, config: BridgeConfig) -> tuple[OverleafSession, dict, Path, Path, Path]:
     store_path = resolve_repo_path(repo_root, config.store_path)
     if not store_path.is_file():
@@ -1900,6 +2106,8 @@ def main(ctx: click.Context, local_only: bool, remote_only: bool, dry_run: bool,
         session.persist(str(store_path))
         return
     sync_project(session, project, sync_root, resolved_olignore_path, local_only, remote_only)
+    if binding_root is not None:
+        replace_base_snapshot_from_local(binding_root, sync_root, resolved_olignore_path)
     session.persist(str(store_path))
 
 
@@ -1948,6 +2156,11 @@ def bind(project_name: str, store_path: str | None, sync_path: str, olignore_pat
         default_branch=existing.default_branch if existing else "",
     )
     write_bridge_config(bind_root, config)
+    try:
+        replace_base_snapshot(bind_root, zip_map(session.download_zip(project["id"])))
+    except RemoteZipDownloadError as exc:
+        click.echo(f"[WARN] {exc}")
+        click.echo("[WARN] Remote merge base was not initialized; first pull may be more conservative.")
     session.persist(str(store_abs_path))
     click.echo(f"Bound {bind_root} to Overleaf project '{config.project_name}'.")
     click.echo(f"config: {config_path}")
@@ -2051,11 +2264,13 @@ def push(dry_run: bool) -> None:
         print_sync_plan(plan)
     elif stage_entries:
         pushed = push_staged_entries(session, project, sync_root, olignore_path, stage_entries)
+        update_base_snapshot_from_local_paths(binding_root, sync_root, set(pushed))
         for rel_path in pushed:
             stage_entries.pop(rel_path, None)
         save_stage_entries(binding_root, stage_entries)
     else:
         sync_project(session, project, sync_root, olignore_path, local_only=True, remote_only=False)
+        replace_base_snapshot_from_local(binding_root, sync_root, olignore_path)
     session.persist(str(store_path))
 
 
@@ -2080,7 +2295,7 @@ def pull(dry_run: bool) -> None:
         )
         print_sync_plan(plan)
     else:
-        sync_project(session, project, sync_root, olignore_path, local_only=False, remote_only=True)
+        pull_bound_project(session, project, binding_root, sync_root, olignore_path)
     session.persist(str(store_path))
 
 
@@ -2128,6 +2343,11 @@ def repo_init(project_name: str, store_path: str | None, sync_path: str, olignor
         default_branch=default_branch,
     )
     config_path = write_bridge_config(repo_root, config)
+    try:
+        replace_base_snapshot(repo_root, zip_map(session.download_zip(project["id"])))
+    except RemoteZipDownloadError as exc:
+        click.echo(f"[WARN] {exc}")
+        click.echo("[WARN] Remote merge base was not initialized; first pull may be more conservative.")
     session.persist(str(store_abs_path))
 
     click.echo(f"Wrote bridge config to {config_path}")
@@ -2219,6 +2439,7 @@ def repo_push_overleaf() -> None:
     require_default_branch(git_status)
     session, project, store_path, sync_root, olignore_path = bridge_session_and_project(repo_root, config)
     sync_project(session, project, sync_root, olignore_path, local_only=True, remote_only=False)
+    replace_base_snapshot_from_local(repo_root, sync_root, olignore_path)
     session.persist(str(store_path))
 
 
@@ -2237,6 +2458,7 @@ def repo_pull_overleaf() -> None:
     require_clean_worktree(git_status)
     session, project, store_path, sync_root, olignore_path = bridge_session_and_project(repo_root, config)
     sync_project(session, project, sync_root, olignore_path, local_only=False, remote_only=True)
+    replace_base_snapshot_from_local(repo_root, sync_root, olignore_path)
     session.persist(str(store_path))
 
 
