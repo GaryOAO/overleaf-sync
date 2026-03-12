@@ -578,6 +578,7 @@ class RealtimeProjectClient:
         self.project_joined = False
         self.project_error = None
         self.pending_update = None
+        self.active_doc_ids: set[str] = set()
 
     def _cookie_header(self) -> str:
         cookie_parts = []
@@ -653,9 +654,45 @@ class RealtimeProjectClient:
         if self.socket is None:
             return
         socket = self.socket
-        self.socket = None
-        if socket.connected:
+        for doc_id in sorted(self.active_doc_ids):
+            try:
+                self.leave_doc(doc_id)
+            except click.ClickException:
+                pass
+            except Exception:
+                pass
+        self.active_doc_ids.clear()
+
+        try:
             socket.disconnect()
+        except Exception:
+            try:
+                transport = socket._transport
+            except Exception:
+                transport = None
+            if transport is not None:
+                try:
+                    transport.disconnect()
+                except TypeError:
+                    transport.disconnect("")
+                except Exception:
+                    pass
+                try:
+                    transport.close()
+                except Exception:
+                    pass
+
+        deadline = time.time() + 2
+        while getattr(socket, "connected", False) and time.time() < deadline:
+            try:
+                socket.wait(seconds=0.1)
+            except Exception:
+                break
+
+        self.socket = None
+        self.project_joined = False
+        self.project_error = None
+        self.pending_update = None
 
     def join_doc(self, doc_id: str) -> tuple[str, int]:
         self.connect()
@@ -676,10 +713,12 @@ class RealtimeProjectClient:
         if ot_type != "sharejs-text-ot":
             raise click.ClickException(f"Unsupported Overleaf document OT type: {ot_type}")
 
+        self.active_doc_ids.add(doc_id)
         return snapshot_lines_to_text(args[1]), args[2]
 
     def leave_doc(self, doc_id: str) -> None:
         if self.socket is None:
+            self.active_doc_ids.discard(doc_id)
             return
 
         result = {}
@@ -688,6 +727,7 @@ class RealtimeProjectClient:
         args = result["args"]
         if args and args[0] is not None:
             raise click.ClickException(f"Failed to leave Overleaf document {doc_id}: {args[0]}")
+        self.active_doc_ids.discard(doc_id)
 
     def update_doc(self, doc_id: str, target_text: str) -> bool:
         current_text, version = self.join_doc(doc_id)
