@@ -1,29 +1,49 @@
-# Overleaf Sync
+<p align="center">
+  <strong>Overleaf Sync</strong><br/>
+  Local-first Overleaf workflow for people who also live in Git.
+</p>
 
-Overleaf Sync is a two-way sync CLI for local folders and Overleaf projects.
+<p align="center">
+  <a href="https://www.python.org/downloads/">
+    <img alt="Python 3.10+" src="https://img.shields.io/badge/python-3.10%2B-3776AB?style=flat-square">
+  </a>
+  <a href="/LICENSE">
+    <img alt="MIT License" src="https://img.shields.io/badge/license-MIT-111827?style=flat-square">
+  </a>
+  <img alt="Short command" src="https://img.shields.io/badge/short%20cmd-ovs-0F766E?style=flat-square">
+</p>
 
-It is built for people who want reproducible local editing, exact remote reconciliation, and a simple command line workflow without manually downloading zip files from Overleaf.
+<p align="center">
+  <code>exact sync</code> · <code>remote tree</code> · <code>compile artifacts</code> · <code>GitHub + Overleaf repo workflow</code>
+</p>
 
-## What it does
+Overleaf Sync is a CLI for working with an existing Overleaf project from a local folder or a local Git repository.
 
-- Syncs a local folder to an existing Overleaf project.
-- Pulls an Overleaf project back to the local folder.
-- Compares against the real remote file tree and the remote zip payload before applying changes.
-- Uses OT updates for text documents when possible and falls back to file upload when needed.
-- Prints the real remote Overleaf file tree.
-- Lists compile artifacts and downloads logs, aux files, or all outputs on demand.
-- Bridges an existing Git repository to GitHub and Overleaf with explicit commands.
-- Downloads the compiled PDF for a project.
-- Supports browser-based login and `.olignore` filtering.
+It focuses on three jobs:
 
-## Why this exists
+- exact folder sync between your working tree and Overleaf
+- access to compile outputs beyond `output.pdf`
+- a repo workflow where GitHub and Overleaf are driven from one local checkout
 
-Most lightweight Overleaf sync scripts stop at "upload files". Overleaf Sync goes further:
+## At a Glance
 
-- it reads the actual Overleaf project tree
-- it reconciles local files against the remote zip snapshot
-- it can delete remote files that should no longer exist
-- it avoids common environment issues such as broken proxy-driven uploads
+```mermaid
+flowchart LR
+  A["Local working tree"] -->|"ovs -l"| B["Overleaf project"]
+  B -->|"ovs -r"| A
+  B -->|"ovs artifacts"| C["PDF, log, aux, synctex, stderr"]
+  A -->|"ovs repo push-github"| D["GitHub / origin"]
+  A -->|"ovs repo push-overleaf"| B
+```
+
+| You want to... | Use this |
+| --- | --- |
+| push local files to Overleaf | `ovs -l --name "Project"` |
+| pull remote files to local | `ovs -r --name "Project"` |
+| preview sync actions first | `ovs --dry-run ...` or `ovs status ...` |
+| inspect the real remote file tree | `ovs tree --name "Project"` |
+| fetch compile logs and artifacts | `ovs artifacts --name "Project"` |
+| manage a Git repo that also syncs to Overleaf | `ovs repo ...` |
 
 ## Install
 
@@ -37,56 +57,132 @@ pip install PySide6
 playwright install chromium
 ```
 
-`PySide6` is only required for the `login` command.
+`PySide6` is only needed for browser login.
 
-## Commands
+You can use either command name:
+
+- short: `ovs`
+- full: `overleaf-sync`
+
+## Quick Start
+
+### 1. Log in once
 
 ```bash
-# Login and persist auth
-overleaf-sync login --store-path .overleaf-sync-auth
-
-# List projects
-overleaf-sync list --store-path .overleaf-sync-auth
-
-# Push local files to Overleaf
-overleaf-sync -l --name "My Overleaf Project" --store-path .overleaf-sync-auth
-
-# Pull remote files to local
-overleaf-sync -r --name "My Overleaf Project" --store-path .overleaf-sync-auth
-
-# Show the real remote file tree
-overleaf-sync tree --name "My Overleaf Project" --store-path .overleaf-sync-auth
-
-# List compile artifacts
-overleaf-sync artifacts --name "My Overleaf Project" --store-path .overleaf-sync-auth
-
-# Download selected compile artifacts
-overleaf-sync artifacts --name "My Overleaf Project" --store-path .overleaf-sync-auth --artifact output.log --artifact output.stderr
-
-# Download all compile artifacts
-overleaf-sync artifacts --name "My Overleaf Project" --store-path .overleaf-sync-auth --all --download-path output
-
-# Download compiled PDF
-overleaf-sync download --name "My Overleaf Project" --store-path .overleaf-sync-auth --download-path output
-
-# Initialize Git/Overleaf bridge config inside an existing Git repository
-overleaf-sync bridge init --name "My Overleaf Project"
-
-# Show Git + Overleaf bridge status
-overleaf-sync bridge status
-
-# Push committed changes to GitHub
-overleaf-sync bridge push-github
-
-# Push current working tree to Overleaf
-overleaf-sync bridge push-overleaf
+ovs login --store-path .overleaf-sync-auth
+ovs list --store-path .overleaf-sync-auth
 ```
 
-If `--name` is omitted, Overleaf Sync uses the current directory name.
+### 2. Sync a local folder with Overleaf
 
-## `.olignore`
+```bash
+# Push local files to Overleaf
+ovs -l --name "My Overleaf Project" --store-path .overleaf-sync-auth
 
-Overleaf Sync reads `.olignore` from the sync root and excludes matching paths before reconciliation.
+# Pull remote files to local
+ovs -r --name "My Overleaf Project" --store-path .overleaf-sync-auth
+
+# Show the plan without changing anything
+ovs --dry-run -l --name "My Overleaf Project" --store-path .overleaf-sync-auth
+ovs status -n "My Overleaf Project" --store-path .overleaf-sync-auth
+```
+
+### 3. Inspect remote state and compile results
+
+```bash
+# Show the remote file tree
+ovs tree --name "My Overleaf Project" --store-path .overleaf-sync-auth
+
+# List compile artifacts
+ovs artifacts --name "My Overleaf Project" --store-path .overleaf-sync-auth
+
+# Download selected outputs
+ovs artifacts --name "My Overleaf Project" --store-path .overleaf-sync-auth \
+  --artifact output.log --artifact output.stderr
+
+# Download the compiled PDF
+ovs download --name "My Overleaf Project" --store-path .overleaf-sync-auth --download-path output
+```
+
+### 4. Add repo workflow on top
+
+Inside an existing Git repository:
+
+```bash
+# Create repo-level config
+ovs repo init --name "My Overleaf Project" --store-path .overleaf-sync-auth
+
+# Show Git + Overleaf side by side
+ovs repo status
+
+# Push committed history to GitHub
+ovs repo push-github
+
+# Pull committed history from GitHub
+ovs repo pull-github
+
+# Push current working tree to Overleaf
+ovs repo push-overleaf
+
+# Pull remote Overleaf state into the working tree
+ovs repo pull-overleaf
+```
+
+> `ovs repo` is a repo workflow layer built on top of the current sync engine.  
+> It is not Overleaf's official Git integration.
+
+## Command Surface
+
+### Core sync
+
+- `ovs login`
+- `ovs list`
+- `ovs -l`
+- `ovs -r`
+- `ovs --dry-run`
+- `ovs status`
+
+### Remote inspection
+
+- `ovs tree`
+- `ovs artifacts`
+- `ovs download`
+
+### Repo workflow
+
+- `ovs repo init`
+- `ovs repo status`
+- `ovs repo push-github`
+- `ovs repo pull-github`
+- `ovs repo push-overleaf`
+- `ovs repo pull-overleaf`
+
+Backward compatibility note:
+
+- `ovs bridge ...` still works
+- `ovs repo ...` is the recommended interface going forward
+
+## Why `repo` Mode Exists
+
+Most Overleaf scripts stop at "upload files". This one does not.
+
+- GitHub operations use your existing local Git repository, its configured `origin`, and your local Git credentials.
+- Overleaf operations still use the auth store plus the current sync engine.
+- `repo init` writes `.overleaf-sync.json` into the Git repo root.
+- `repo push-github` and `repo pull-github` only run on the configured default branch and require a clean working tree.
+- `repo push-overleaf` also stays on the configured default branch, but it syncs the current working tree and allows uncommitted changes.
+- `repo pull-overleaf` requires a clean working tree before applying remote changes locally.
+
+That difference is intentional:
+
+- GitHub reflects committed history.
+- Overleaf can reflect your current working tree.
+
+## Config Files
+
+### `.olignore`
+
+`.olignore` is read from the sync root and excludes matching paths before reconciliation.
 
 Example:
 
@@ -102,37 +198,36 @@ output/*
 .olauth
 ```
 
-## Git Bridge
+### `.overleaf-sync.json`
 
-The `bridge` command group is a repository orchestration layer, not Overleaf's official Git integration.
+Created by `ovs repo init` in the Git repo root. It stores:
 
-- GitHub operations use your existing local Git repository, its configured `origin` remote, and your local Git credentials.
-- Overleaf operations still use the persisted auth store plus the existing sync engine in this tool.
-- `bridge init` writes a repository-local `.overleaf-sync.json` config in the Git repo root.
-- `bridge push-github` and `bridge pull-github` only run on the configured default branch and require a clean working tree.
-- `bridge push-overleaf` also only runs on the configured default branch, but it syncs the current working tree and allows uncommitted changes.
-- `bridge pull-overleaf` requires a clean working tree before writing remote changes locally.
+- Overleaf project name
+- auth store path
+- sync path
+- `.olignore` path
+- Git remote
+- default branch
 
-This intentionally differs from Git semantics on the Overleaf side: GitHub reflects committed history, while Overleaf can reflect your current working tree.
+It is hidden, so it is not synced to Overleaf by the current sync rules.
 
 ## Security
 
-Do not commit these files:
+Do not commit these unless you know exactly why:
 
 - `.overleaf-sync-auth`
 - `.olauth`
-- `.olignore` if it contains project-specific private paths
-- `.overleaf-sync.json` if your repository/project mapping is sensitive
-- downloaded PDFs or private project source trees
-- compile logs or artifacts if they contain private project contents
+- `.overleaf-sync.json` if the repo/project mapping is sensitive
+- downloaded PDFs or compile artifacts if they contain private content
 
-This repository intentionally does not include any Overleaf auth store, cookies, private project data, or local export artifacts.
+This repository does not include any auth store, cookies, private Overleaf project data, or local export artifacts.
 
-## Notes
+## What It Does Not Do
 
-- The tool syncs against an existing Overleaf project. It does not create Overleaf projects.
-- Browser login requires a desktop environment.
-- For large local workspaces, keep backup archives and generated outputs in `.olignore`.
+- create Overleaf projects
+- create GitHub repositories
+- use the GitHub API
+- depend on Overleaf premium Git integration
 
 ## License
 
